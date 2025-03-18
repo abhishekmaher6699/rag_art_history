@@ -1,0 +1,233 @@
+import time
+from langchain.schema import Document
+
+from langchain_community.utilities import WikipediaAPIWrapper
+from langchain_community.tools import WikipediaQueryRun
+from langchain_core.prompts import ChatPromptTemplate
+from langgraph.graph.message import add_messages
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_chroma import Chroma
+from langchain_core.messages import AIMessage
+from langchain_core.output_parsers import StrOutputParser
+from langchain_community.vectorstores import FAISS
+
+from typing_extensions import TypedDict, Annotated, List
+
+from agent_comps.chains import query_construction_prompt, re_write_prompt, rag_prompt, grade_prompt, answer_prompt, initial_routing
+from agent_comps.output_models import *
+
+model = ChatGoogleGenerativeAI(
+    model="gemini-2.0-flash",
+    )
+
+embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+
+new_vector_store = FAISS.load_local(
+    "./data", embeddings, allow_dangerous_deserialization=True
+)
+retriever = new_vector_store.as_retriever(search_kwargs={"k": 5})
+
+class GraphState(TypedDict):
+    original_query: str
+    constructed_query: str
+    messages: Annotated[list, add_messages]
+    generation: str
+    documents: List[str]
+    route_to_retrieve: int
+    route_to_wiki: int
+    source: str
+
+
+wikipedia_wrapper = WikipediaAPIWrapper(top_k_results=1, doc_content_chars_max=1000)
+wikipedia_tool = WikipediaQueryRun(api_wrapper = wikipedia_wrapper)
+
+def construct_query(state):
+
+    print("--QUERY CONSTRUCTION--")
+    
+    construction_chain = query_construction_prompt | model | StrOutputParser()
+
+    query = state["original_query"]
+    messages = state["messages"]
+    res = construction_chain.invoke({"query": query, "history": messages})
+    print("Constructed Query: ", res)
+    return {"messages": res, "constructed_query": res, "original_query": query, "route_to_retrieve" : 0, "route_to_wiki": 0}
+
+def retrieve(state):
+
+    print("--RETRIEVAL--")
+
+    query = state["constructed_query"]
+    route_to_retrieve = state["route_to_retrieve"] + 1
+    print(query)
+
+    docs = retriever.invoke(query)
+
+    return {"documents": docs, "constructed_query": query, "route_to_retrieve" : route_to_retrieve, "source": 'retrieval'}
+
+def grade_docs(state):
+
+    print("--GRADING DOCUMENTS--")
+
+    grader_model = model.with_structured_output(GradeDocument)
+    retrieval_grader = grade_prompt | grader_model
+
+    query = state["constructed_query"]
+    docs = state["documents"]
+    # print(docs)
+
+    filtered_docs = []
+
+    if len(docs) > 1:
+      for doc in docs:
+        # print(doc)
+        time.sleep(1)
+        score = retrieval_grader.invoke({"document": doc, "question": query})
+        if score.grade == "yes":
+          print("--RELEVANT--")
+          filtered_docs.append(doc)
+        else:
+          print("--IRRELEVANT--")
+          continue
+    else:
+        time.sleep(1)
+        score = retrieval_grader.invoke({"document": docs[0], "question": query})
+        if score.grade == "yes":
+          print("--RELEVANT--")
+          filtered_docs.append(docs[0])
+        else:
+          print("--IRRELEVANT--")
+
+
+    return {"documents": filtered_docs, "constructed_query": query}
+
+def generate(state):
+
+    print("--GENERATION--")
+    
+    rag_chain = rag_prompt | model | StrOutputParser()
+
+    query = state["constructed_query"]
+    docs = state["documents"]
+    messages = state["messages"]
+
+    time.sleep(1)
+    res = rag_chain.invoke({"input": query, "documents": docs, "context": state["messages"]})
+    print("Generated answer: ", res)
+    return {"generation": res}
+
+def answer_grade(state):
+
+    print("--ANSWER GRADING--")
+
+    answer_grader = model.with_structured_output(GradeAnswer)
+    answer_grader_chain = answer_prompt | answer_grader
+
+    query = state["constructed_query"]
+    generation = state["generation"]
+
+    time.sleep(1)
+    score = answer_grader_chain.invoke({"question": query, "generation": generation})
+    # print(score)
+    if score.binary_score == 'yes':
+        print("--USEFUL--")
+        # state["messages"] = generation
+        return "useful"
+    else:
+        print("--NOT USEFUL--")
+        return "not useful"
+
+def save_messages(state):
+    print("--SAVING MESSAGES--")
+    generation = state["generation"]
+    new_msg = AIMessage(content = generation)
+    return {"messages": new_msg}
+
+def rewrite_query(state):
+
+    print("--REWRITING QUERY--")
+    
+    question_rewriter = re_write_prompt | model | StrOutputParser()
+    query = state["constructed_query"]
+
+    res = question_rewriter.invoke({"question": query})
+    print("Rewritten query: ", res)
+    return {"constructed_query": res}
+
+
+def wiki_search(state):
+    print("--WIKIPEDIA SEARCH--")
+    query = state["constructed_query"]
+    route_to_wiki = state["route_to_wiki"] + 1
+    docs = wikipedia_tool.invoke({"query": query})
+    res = Document(page_content=docs)
+
+    return {"documents": [res], "constructed_query": query, "route_to_wiki": route_to_wiki, "source": 'wiki'}
+
+def decide_to_generate(state):
+
+    docs = state["documents"]
+    if docs:
+
+        return "generate"
+    else:
+        return "rewrite"
+
+def question_router(state):
+
+    route_to_retrieve = state["route_to_retrieve"]
+    route_to_wiki = state["route_to_wiki"]
+    # print(route_to_retrieve, route_to_wiki)
+
+    if route_to_retrieve < 1:
+        print("--ROUTING TO RETRIEVER--")
+        return "retrieve"
+    elif route_to_wiki < 1:
+        print("--ROUTING TO WIKI--")
+        return "wiki"
+    else:
+      return "NA"
+
+def initial_redirection(state):
+    print("--INITIAL ROUTING--")
+
+    initial_router = model.with_structured_output(QuestionRouter)
+    initial_router_chain = initial_routing | initial_router
+
+    messages = state["messages"]
+    query = state['original_query']
+
+    if len(messages) < 1:
+      messages = [query]
+    else:
+      messages =messages[-1] + [query]
+
+    out = initial_router_chain.invoke({"messages": messages, 'query': query})
+    return out.route_to
+
+def llm(state):
+
+    print("--DIRECT GENERATION--")
+
+    prompt_template = ChatPromptTemplate.from_template(
+        "You are a helpful RAG assistant that is a part of a system that answers questions related to Art history. Your job is to answer the casual greetings and common inquiries of users. User question: {question}"
+    )
+    # messages = state["messages"]
+    question = state['original_query']
+    prompt = prompt_template.invoke({"question": question})
+    res = model.invoke(prompt)
+    print(res)
+    return {"generation": res.content}
+
+def get_sources(response):
+    docs = response['documents']
+    sources = []
+    for doc in docs:
+        sources.append(doc.metadata['source'])
+    return list(set(sources))
+
+def na(state):
+    return {'generation': "I don't know. The input documents doesn't have information on this", "source": 'none'}
+
+def irrelevant(state):
+    return {'generation': "The query is irrelevant to art history."}
