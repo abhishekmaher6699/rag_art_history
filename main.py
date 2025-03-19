@@ -34,6 +34,12 @@ if "api_key" not in st.session_state:
 if "model_name" not in st.session_state:
     st.session_state.model_name = "gemini-2.0-flash"
 
+st.set_page_config(
+    page_title="ART RAG APP", 
+    page_icon="🎨",                 
+    layout="wide",                  
+    initial_sidebar_state="expanded" 
+)
 
 st.sidebar.markdown(
     "Documents are sourced from [Boise State Art History](https://boisestate.pressbooks.pub/arthistory/)."
