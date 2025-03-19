@@ -42,7 +42,7 @@ st.sidebar.markdown(
 st.sidebar.title("Settings")
 
 
-model_choices = ["gemini-2.0-flash", "gemini-1.5-pro", "phoenix-lite"]
+model_choices = ["gemini-2.0-flash", "gemini-2.0-pro", "gemini-2.0-flash-lite", "gemini-1.5-pro"]
 selected_model = st.sidebar.selectbox(
     "Select Model:",
     options=model_choices,
