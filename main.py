@@ -2,15 +2,14 @@ import streamlit as st
 import uuid
 import os
 from dotenv import load_dotenv
-from psycopg import connect, Connection
+from psycopg import connect
 from langgraph.checkpoint.postgres import PostgresSaver
 from langchain_chroma import Chroma
 
-from agent_comps.nodes import get_sources
-# Load environment variables
+from src.agent_comps.agent import get_sources, Agent
+
 load_dotenv()
 
-# Database configuration
 DB_HOST = os.getenv("DB_HOST")
 DB_PORT = os.getenv("DB_PORT", "5432")
 DB_NAME = os.getenv("DB_NAME")
@@ -26,57 +25,76 @@ connection_kwargs = {
 def initialize_new_thread():
     return str(uuid.uuid4())
 
-# Initialize session state
 if "thread_id" not in st.session_state:
     st.session_state.thread_id = initialize_new_thread()
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
+if "api_key" not in st.session_state:
+    st.session_state.api_key = ""
+if "model_name" not in st.session_state:
+    st.session_state.model_name = "gemini-2.0-flash"
 
-# Sidebar to start a new chat
+
+st.sidebar.markdown(
+    "Documents are sourced from [Boise State Art History](https://boisestate.pressbooks.pub/arthistory/)."
+)
+
+st.sidebar.title("Settings")
+
+
+model_choices = ["gemini-2.0-flash", "gemini-1.5-pro", "phoenix-lite"]
+selected_model = st.sidebar.selectbox(
+    "Select Model:",
+    options=model_choices,
+    index=model_choices.index(st.session_state.get("model_name", "gemini-2.0-flash")),
+    key="model_name",
+)
+
+if "model_name" not in st.session_state or st.session_state.model_name != selected_model:
+    st.session_state.model_name = selected_model
+
+st.sidebar.text_input(
+    "Enter API Key:",
+    value=st.session_state.api_key,
+    key="api_key",
+    type="password",
+    help="Your API key to access the AI models."
+)
+
 if st.sidebar.button("Start New Chat", key="start_new_chat"):
     st.session_state.thread_id = initialize_new_thread()
     st.session_state.chat_history = []
     st.sidebar.success("Started a new chat session!")
 
-# Main application UI
-st.title("Art Rag App")
-st.subheader("Chat with your AI assistant")
 
-# Display chat history
+st.subheader("Chat with your Art AI assistant")
+
 for chat in st.session_state.chat_history:
     with st.chat_message(chat["role"]):
         st.markdown(chat["content"])
 
-# User input and response handling
 if user_input := st.chat_input("Type your message..."):
-    # Add user input to chat history
     st.session_state.chat_history.append({"role": "user", "content": user_input})
 
-    # Display user message
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # Placeholder for assistant response
     with st.chat_message("assistant"):
         response_placeholder = st.empty()
         response_placeholder.markdown("Thinking...")
 
     try:
-        # Import workflow dynamically to avoid circular dependencies
-        from agent_comps.agent import workflow
+        agent = Agent(st.session_state.model_name, st.session_state.api_key)
+        workflow = agent.create_agent()
 
-        # Connect to the database
         with connect(CHECKPOINT_DB_URI, **connection_kwargs) as conn:
             checkpointer = PostgresSaver(conn)
             checkpointer.setup()
 
-            # Compile the workflow with the checkpointer
             app = workflow.compile(checkpointer=checkpointer)
 
-            # Prepare config with the thread ID
             config = {"configurable": {"thread_id": st.session_state.thread_id}}
 
-            # Invoke the app with the user input
             ans = app.invoke({"original_query": user_input}, config=config)
 
             print(ans)
@@ -93,7 +111,6 @@ if user_input := st.chat_input("Type your message..."):
             response_placeholder.markdown(assistant_response)
 
     except Exception as e:
-        # Handle errors gracefully
         error_message = f"An error occurred: {e}"
         st.session_state.chat_history.append({"role": "assistant", "content": error_message})
         response_placeholder.markdown(error_message)
