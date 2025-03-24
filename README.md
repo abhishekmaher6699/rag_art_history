@@ -66,8 +66,8 @@ When a user provides a query, the agent processes it through the following steps
 
 ### → **Clone the Repository:**
    ```bash
-   git clone <repository_url>
-   cd <repository_name>
+   git clone https://github.com/abhishekmaher6699/rag_art_history
+   cd rag_art_history
    ```
 
 ### → **Create a Virtual Environment:**
